@@ -26,6 +26,7 @@ function loadState() {
           ? project.plates.map((plate) => ({
               ...plate,
               printMinutes: Number(plate.printMinutes) > 0 ? Number(plate.printMinutes) : 0,
+              printing: Boolean(plate.printing),
             }))
           : [],
       })),
@@ -98,6 +99,7 @@ function buildPlan(project, currentAms, timeSortOrder) {
   let totalSwaps = 0;
 
   while (pending.length > 0) {
+    const prioritizePrinting = pending.some((p) => p.printing);
     let bestIndex = 0;
     let bestMissing = Number.POSITIVE_INFINITY;
     let bestOverlap = -1;
@@ -107,6 +109,10 @@ function buildPlan(project, currentAms, timeSortOrder) {
     const freq = colorFrequency(pending);
 
     for (let i = 0; i < pending.length; i += 1) {
+      if (prioritizePrinting && !pending[i].printing) {
+        continue;
+      }
+
       const req = new Set(pending[i].colorIds);
       const printMinutes = Number(pending[i].printMinutes) > 0 ? Number(pending[i].printMinutes) : 0;
       let missing = 0;
@@ -195,6 +201,8 @@ function App() {
   const [state, setState] = useState(loadState);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectSlots, setNewProjectSlots] = useState(4);
+  const [projectNameDraft, setProjectNameDraft] = useState('');
+  const [projectSlotsDraft, setProjectSlotsDraft] = useState('');
 
   const [newColorName, setNewColorName] = useState('');
   const [newPlateName, setNewPlateName] = useState('');
@@ -202,6 +210,7 @@ function App() {
   const [newPlateColors, setNewPlateColors] = useState([]);
   const [planTimeSortOrder, setPlanTimeSortOrder] = useState('asc');
   const [plateMinuteDrafts, setPlateMinuteDrafts] = useState({});
+  const [plateNameDrafts, setPlateNameDrafts] = useState({});
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -223,11 +232,17 @@ function App() {
     if (!selectedProject) {
       setNewPlateColors([]);
       setPlateMinuteDrafts({});
+      setPlateNameDrafts({});
+      setProjectNameDraft('');
+      setProjectSlotsDraft('');
       return;
     }
 
     setNewPlateColors((prev) => prev.filter((id) => selectedProject.colors.some((c) => c.id === id)));
     setPlateMinuteDrafts({});
+    setPlateNameDrafts({});
+    setProjectNameDraft(selectedProject.name);
+    setProjectSlotsDraft(String(selectedProject.amsSlots));
   }, [selectedProject]);
 
   const currentAms = useMemo(() => {
@@ -329,6 +344,7 @@ function App() {
           printMinutes,
           colorIds: newPlateColors,
           printed: false,
+          printing: false,
         },
       ],
     }));
@@ -418,6 +434,46 @@ function App() {
     });
   }
 
+  function handlePlateNameDraftChange(plateId, value) {
+    setPlateNameDrafts((prev) => ({
+      ...prev,
+      [plateId]: value,
+    }));
+  }
+
+  function commitPlateNameDraft(plateId) {
+    const draft = plateNameDrafts[plateId];
+    if (draft === undefined || !selectedProject) {
+      return;
+    }
+
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      setPlateNameDrafts((prev) => {
+        const next = { ...prev };
+        delete next[plateId];
+        return next;
+      });
+      return;
+    }
+
+    updateProject(selectedProject.id, (project) => ({
+      ...project,
+      plates: project.plates.map((plate) => {
+        if (plate.id !== plateId) {
+          return plate;
+        }
+        return { ...plate, name: trimmed };
+      }),
+    }));
+
+    setPlateNameDrafts((prev) => {
+      const next = { ...prev };
+      delete next[plateId];
+      return next;
+    });
+  }
+
   function togglePrinted(plateId) {
     if (!selectedProject) {
       return;
@@ -433,8 +489,81 @@ function App() {
         return {
           ...plate,
           printed: !plate.printed,
+          printing: plate.printed ? plate.printing : false,
         };
       }),
+    }));
+  }
+
+  function togglePrinting(plateId) {
+    if (!selectedProject) {
+      return;
+    }
+
+    updateProject(selectedProject.id, (project) => ({
+      ...project,
+      plates: project.plates.map((plate) => {
+        if (plate.printed) {
+          return plate;
+        }
+
+        if (plate.id === plateId) {
+          return {
+            ...plate,
+            printing: !plate.printing,
+          };
+        }
+
+        return {
+          ...plate,
+          printing: false,
+        };
+      }),
+    }));
+  }
+
+  function commitProjectSettings() {
+    if (!selectedProject) {
+      return;
+    }
+
+    const name = projectNameDraft.trim();
+    const slots = Math.max(1, parseInt(projectSlotsDraft, 10) || 1);
+    if (!name) {
+      setProjectNameDraft(selectedProject.name);
+      setProjectSlotsDraft(String(selectedProject.amsSlots));
+      return;
+    }
+
+    updateProject(selectedProject.id, (project) => ({
+      ...project,
+      name,
+      amsSlots: slots,
+      currentAms: (project.currentAms ?? []).slice(0, slots),
+    }));
+
+    setProjectNameDraft(name);
+    setProjectSlotsDraft(String(slots));
+  }
+
+  function removeColor(colorId) {
+    if (!selectedProject) {
+      return;
+    }
+
+    const blockingPlate = selectedProject.plates.find((plate) => plate.colorIds.includes(colorId));
+    if (blockingPlate) {
+      return;
+    }
+
+    updateProject(selectedProject.id, (project) => ({
+      ...project,
+      colors: project.colors.filter((color) => color.id !== colorId),
+      currentAms: (project.currentAms ?? []).filter((id) => id !== colorId),
+      plates: project.plates.map((plate) => ({
+        ...plate,
+        colorIds: plate.colorIds.filter((id) => id !== colorId),
+      })),
     }));
   }
 
@@ -474,7 +603,16 @@ function App() {
   }
 
   const colorNameById = new Map((selectedProject?.colors ?? []).map((c) => [c.id, c.name]));
-  const activePlates = selectedProject ? selectedProject.plates.filter((p) => !p.printed) : [];
+  const usedColorIds = new Set((selectedProject?.plates ?? []).flatMap((plate) => plate.colorIds));
+  const printingPlateIds = new Set(
+    (selectedProject?.plates ?? []).filter((plate) => plate.printing && !plate.printed).map((plate) => plate.id)
+  );
+  const hasPrintingPlate = printingPlateIds.size > 0;
+  const activePlates = selectedProject
+    ? [...selectedProject.plates]
+        .filter((p) => !p.printed)
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : [];
 
   function colorsForPlate(plate) {
     return [...sortedProjectColors].sort((a, b) => {
@@ -599,6 +737,38 @@ function App() {
                 <section className="rounded-xl bg-white p-6 shadow">
                   <h2 className="text-lg font-semibold">Project: {selectedProject.name}</h2>
                   <p className="mt-1 text-sm text-slate-600">AMS slots: {selectedProject.amsSlots}</p>
+                  <div className="mt-4 grid gap-3 md:max-w-2xl md:grid-cols-2">
+                    <label className="grid gap-1 text-sm font-medium">
+                      Edit project name
+                      <input
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal"
+                        value={projectNameDraft}
+                        onChange={(e) => setProjectNameDraft(e.target.value)}
+                        onBlur={commitProjectSettings}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitProjectSettings();
+                          }
+                        }}
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm font-medium">
+                      Edit AMS slots
+                      <input
+                        type="number"
+                        min={1}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal"
+                        value={projectSlotsDraft}
+                        onChange={(e) => setProjectSlotsDraft(e.target.value)}
+                        onBlur={commitProjectSettings}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitProjectSettings();
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
 
                   <div className="mt-6 grid gap-6 md:grid-cols-2">
                     <div>
@@ -620,8 +790,20 @@ function App() {
 
                       <ul className="mt-3 space-y-1">
                         {sortedProjectColors.map((color) => (
-                          <li key={color.id} className="rounded border border-slate-200 px-3 py-2 text-sm">
-                            {color.name}
+                          <li
+                            key={color.id}
+                            className="flex items-center justify-between gap-2 rounded border border-slate-200 px-3 py-2 text-sm"
+                          >
+                            <span>{color.name}</span>
+                            {!usedColorIds.has(color.id) && (
+                              <button
+                                type="button"
+                                className="rounded border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                                onClick={() => removeColor(color.id)}
+                              >
+                                Remove
+                              </button>
+                            )}
                           </li>
                         ))}
                         {selectedProject.colors.length === 0 && (
@@ -683,45 +865,74 @@ function App() {
                   <div className="mt-4 space-y-4">
                     {activePlates.map((plate) => (
                       <article key={plate.id} className="rounded-lg border border-slate-200 p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div>
-                            <h3 className="font-semibold">{plate.name}</h3>
-                            <p className="mt-1 text-xs text-slate-500">
-                              Select colors used on this plate
-                            </p>
+                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                          <div className="w-full">
+                            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+                              <label className="grid gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Plate name
+                                <input
+                                  className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900"
+                                  value={plateNameDrafts[plate.id] ?? plate.name}
+                                  onChange={(e) => handlePlateNameDraftChange(plate.id, e.target.value)}
+                                  onBlur={() => commitPlateNameDraft(plate.id)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      commitPlateNameDraft(plate.id);
+                                    }
+                                  }}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Est. print time (min)
+                                <input
+                                  type="number"
+                                  min={0}
+                                  className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900"
+                                  value={
+                                    plateMinuteDrafts[plate.id] ??
+                                    String(Number(plate.printMinutes) > 0 ? plate.printMinutes : 0)
+                                  }
+                                  onChange={(e) => handlePlateMinutesDraftChange(plate.id, e.target.value)}
+                                  onBlur={() => commitPlateMinutesDraft(plate.id)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      commitPlateMinutesDraft(plate.id);
+                                    }
+                                  }}
+                                />
+                              </label>
+                            </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => togglePrinted(plate.id)}
-                            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
-                          >
-                            Mark printed
-                          </button>
+                          <div className="flex flex-col gap-2">
+                            {plate.printing && (
+                              <p className="rounded-md bg-indigo-700 px-3 py-1.5 text-center text-xs font-semibold text-white">
+                                Printing now
+                              </p>
+                            )}
+                            {!plate.printing && !hasPrintingPlate && (
+                              <button
+                                type="button"
+                                onClick={() => togglePrinting(plate.id)}
+                                className="rounded-md border border-indigo-300 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+                              >
+                                Mark printing
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => togglePrinted(plate.id)}
+                              className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+                            >
+                              Mark printed
+                            </button>
+                          </div>
                         </div>
 
-                        <div className="mt-3 max-w-xs">
-                          <label className="grid gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Estimated print time (minutes)
-                            <input
-                              type="number"
-                              min={0}
-                              className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900"
-                              value={
-                                plateMinuteDrafts[plate.id] ??
-                                String(Number(plate.printMinutes) > 0 ? plate.printMinutes : 0)
-                              }
-                              onChange={(e) => handlePlateMinutesDraftChange(plate.id, e.target.value)}
-                              onBlur={() => commitPlateMinutesDraft(plate.id)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  commitPlateMinutesDraft(plate.id);
-                                }
-                              }}
-                            />
-                          </label>
-                        </div>
+                        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Select colors used on this plate
+                        </p>
 
-                        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {colorsForPlate(plate).map((color) => (
                             <label key={color.id} className="flex items-center gap-2 text-sm">
                               <input
@@ -752,24 +963,6 @@ function App() {
                             <p className="text-xs text-slate-500">
                               {plate.colorIds.map((id) => colorNameById.get(id)).filter(Boolean).join(', ') || 'No colors selected'}
                             </p>
-                          </div>
-                          <div className="w-28">
-                            <input
-                              type="number"
-                              min={0}
-                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs"
-                              value={
-                                plateMinuteDrafts[plate.id] ??
-                                String(Number(plate.printMinutes) > 0 ? plate.printMinutes : 0)
-                              }
-                              onChange={(e) => handlePlateMinutesDraftChange(plate.id, e.target.value)}
-                              onBlur={() => commitPlateMinutesDraft(plate.id)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  commitPlateMinutesDraft(plate.id);
-                                }
-                              }}
-                            />
                           </div>
                           <button
                             type="button"
@@ -829,11 +1022,28 @@ function App() {
                       <p className="mt-4 text-sm font-semibold">Estimated swaps: {planner.totalSwaps}</p>
                       <ol className="mt-3 space-y-3">
                         {planner.steps.map((step, index) => (
-                          <li key={step.plateId} className="rounded border border-slate-200 p-3">
+                          <li
+                            key={step.plateId}
+                            className={`rounded border p-3 ${
+                              printingPlateIds.has(step.plateId) ? 'border-indigo-600' : 'border-slate-200'
+                            }`}
+                          >
                             <div className="flex items-center justify-between gap-4">
                               <div>
                                 <p className="text-sm font-semibold">
                                   {index + 1}. {step.plateName}
+                                  {printingPlateIds.has(step.plateId) && (
+                                    <span className="ml-2 text-xs font-semibold text-indigo-700">Printing now</span>
+                                  )}
+                                  {!printingPlateIds.has(step.plateId) && !hasPrintingPlate && (
+                                    <button
+                                      type="button"
+                                      className="ml-2 text-xs font-semibold text-sky-700 underline hover:text-sky-600"
+                                      onClick={() => togglePrinting(step.plateId)}
+                                    >
+                                      Mark Printing
+                                    </button>
+                                  )}
                                 </p>
                                 <p className="text-xs text-slate-500">
                                   Required: {step.required.map((id) => colorNameById.get(id)).filter(Boolean).join(', ') || 'None'}
