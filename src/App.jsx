@@ -83,17 +83,7 @@ function chooseNextSet(currentSet, requiredSet, futurePlates, slots) {
 function buildPlan(project, currentAms, timeSortOrder) {
   const slots = Number(project.amsSlots) || 4;
   const remaining = project.plates.filter((p) => !p.printed);
-
-  const impossible = remaining.filter((plate) => plate.colorIds.length > slots);
-  if (impossible.length > 0) {
-    return {
-      error: `Some plates require more than ${slots} colors. Increase AMS size or reduce colors on those plates.`,
-      steps: [],
-      totalSwaps: 0,
-    };
-  }
-
-  let currentSet = new Set(currentAms.slice(0, slots));
+  let currentSet = new Set(currentAms);
   const pending = [...remaining];
   const steps = [];
   let totalSwaps = 0;
@@ -158,6 +148,7 @@ function buildPlan(project, currentAms, timeSortOrder) {
 
     const plate = pending.splice(bestIndex, 1)[0];
     const requiredSet = new Set(plate.colorIds);
+    const requiresPauseAndFilamentSwap = requiredSet.size > slots;
     const nextSet = chooseNextSet(currentSet, requiredSet, pending, slots);
 
     let swaps = 0;
@@ -189,6 +180,7 @@ function buildPlan(project, currentAms, timeSortOrder) {
       swaps,
       swapOut: remove,
       swapIn: add,
+      requiresPauseAndFilamentSwap,
     });
 
     currentSet = nextSet;
@@ -250,9 +242,7 @@ function App() {
       return [];
     }
 
-    return (selectedProject.currentAms ?? [])
-      .filter((id) => selectedProject.colors.some((color) => color.id === id))
-      .slice(0, selectedProject.amsSlots);
+    return (selectedProject.currentAms ?? []).filter((id) => selectedProject.colors.some((color) => color.id === id));
   }, [selectedProject]);
 
   const planner = useMemo(() => {
@@ -539,7 +529,7 @@ function App() {
       ...project,
       name,
       amsSlots: slots,
-      currentAms: (project.currentAms ?? []).slice(0, slots),
+      currentAms: project.currentAms ?? [],
     }));
 
     setProjectNameDraft(name);
@@ -573,19 +563,13 @@ function App() {
     }
 
     updateProject(selectedProject.id, (project) => {
-      const existing = (project.currentAms ?? [])
-        .filter((id) => project.colors.some((color) => color.id === id))
-        .slice(0, project.amsSlots);
+      const existing = (project.currentAms ?? []).filter((id) => project.colors.some((color) => color.id === id));
 
       if (existing.includes(colorId)) {
         return {
           ...project,
           currentAms: existing.filter((id) => id !== colorId),
         };
-      }
-
-      if (existing.length >= project.amsSlots) {
-        return project;
       }
 
       return {
@@ -1025,7 +1009,11 @@ function App() {
                           <li
                             key={step.plateId}
                             className={`rounded border p-3 ${
-                              printingPlateIds.has(step.plateId) ? 'border-indigo-600' : 'border-slate-200'
+                              step.requiresPauseAndFilamentSwap
+                                ? 'border-rose-500'
+                                : printingPlateIds.has(step.plateId)
+                                  ? 'border-indigo-600'
+                                  : 'border-slate-200'
                             }`}
                           >
                             <div className="flex items-center justify-between gap-4">
@@ -1061,6 +1049,11 @@ function App() {
                               <p className="mt-1 text-xs text-slate-600">
                                 Swap out: {step.swapOut.map((id) => colorNameById.get(id)).filter(Boolean).join(', ') || 'None'} | Swap in:{' '}
                                 {step.swapIn.map((id) => colorNameById.get(id)).filter(Boolean).join(', ') || 'None'}
+                              </p>
+                            )}
+                            {step.requiresPauseAndFilamentSwap && (
+                              <p className="mt-2 rounded bg-rose-100 px-2 py-1 text-xs font-semibold text-rose-800">
+                                Requires Pause and Filament Swap
                               </p>
                             )}
                           </li>
